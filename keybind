@@ -226,9 +226,11 @@ RerollBox:AddToggle("CheckFragments", {
 -- Auto reroll settings
 AutoBox:AddDropdown("TargetRaces", {
     Values = TARGETS,
+    Default = {},
     Multi = true,
     Text = "Target races",
     Tooltip = "Stops as soon as you land any selected race",
+    AllowNull = true,
 })
 AutoBox:AddSlider("MaxRerolls", {
     Text = "Max rerolls", Default = 10, Min = 1, Max = 50, Rounding = 0,
