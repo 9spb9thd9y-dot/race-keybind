@@ -1,0 +1,363 @@
+--[[
+    Alien Hub | Race Reroll  (standalone, Linoria)
+    - Reroll once (button or keybind)
+    - Optional auto-reroll until you land one of the target races
+      (Human / Mink / Shark / Angel) with a hard limit on attempts
+    Uses the same remote the hub's "Reroll Race" button used:
+        CommF_:InvokeServer("BlackbeardReward", "Reroll", "2")
+    Also: Change to Ghoul (free) and Change to Cyborg (2500). Costs are assumed to
+    be fragments, and are checked against Data.Fragments when that value exists.
+    Not tested in-game.
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UIS = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+local repo = "https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/"
+local okLib, Library = pcall(function()
+    return loadstring(game:HttpGet(repo .. "Library.lua"))()
+end)
+if not okLib or not Library then
+    warn("[Alien Hub] Failed to load Linoria Library: " .. tostring(Library))
+    return
+end
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+
+local Unloaded = false
+
+local function Notify(text, duration)
+    pcall(function() Library:Notify(tostring(text), duration or 3) end)
+end
+
+----------------------------------------------------------------------
+-- Race helpers
+----------------------------------------------------------------------
+local TARGETS = { "Human", "Mink", "Shark", "Angel" }
+-- Internal names are my best guess ("Skypiea" appears in the hub's original
+-- code; "Fishman" is assumed for Shark). Both spellings are accepted.
+local RACE_ALIASES = {
+    Human = { "human" },
+    Mink = { "mink" },
+    Shark = { "shark", "fishman" },
+    Angel = { "angel", "skypiea" },
+}
+
+local function GetRace()
+    local data = LocalPlayer:FindFirstChild("Data")
+    local race = data and data:FindFirstChild("Race")
+    return race and tostring(race.Value) or nil
+end
+
+local function RaceMatches(raceName, target)
+    if not raceName then return false end
+    local lower = raceName:lower()
+    for _, alias in ipairs(RACE_ALIASES[target] or {}) do
+        if lower:find(alias, 1, true) then return true end
+    end
+    return false
+end
+
+-- Returns the first selected target that matches the current race, or nil
+local function CurrentTargetHit()
+    local race = GetRace()
+    local selected = Options.TargetRaces and Options.TargetRaces.Value or {}
+    for _, target in ipairs(TARGETS) do
+        if selected[target] and RaceMatches(race, target) then return target end
+    end
+    return nil
+end
+
+local function SelectedTargetCount()
+    local n = 0
+    for _, on in pairs(Options.TargetRaces.Value) do
+        if on then n = n + 1 end
+    end
+    return n
+end
+
+-- Costs as you gave them. The currency is assumed to be fragments.
+local COSTS = { Reroll = 3000, Cyborg = 2500, Ghoul = 0 }
+
+local function GetFragments()
+    local data = LocalPlayer:FindFirstChild("Data")
+    local frag = data and data:FindFirstChild("Fragments")
+    return frag and tonumber(frag.Value) or nil
+end
+
+-- If the balance can't be read we don't block (the game still enforces the cost).
+local function CanAfford(cost)
+    local have = GetFragments()
+    if have == nil then return true, nil end
+    return have >= cost, have
+end
+
+local function InvokeCommF(...)
+    local args = { ... }
+    return pcall(function()
+        local remotes = ReplicatedStorage:WaitForChild("Remotes", 5)
+        local commF = remotes:WaitForChild("CommF_", 5)
+        return commF:InvokeServer(unpack(args))
+    end)
+end
+
+local function InvokeReroll()
+    return InvokeCommF("BlackbeardReward", "Reroll", "2")
+end
+
+----------------------------------------------------------------------
+-- UI
+----------------------------------------------------------------------
+local Window = Library:CreateWindow({
+    Title = "Alien Hub | Race Reroll",
+    Center = true,
+    AutoShow = true,
+    TabPadding = 8,
+    MenuFadeTime = 0.2,
+})
+
+local Tabs = {
+    Main = Window:AddTab("Race Reroll"),
+    ["UI Settings"] = Window:AddTab("UI Settings"),
+}
+
+local RerollBox = Tabs.Main:AddLeftGroupbox("Reroll")
+local KeyBox = Tabs.Main:AddLeftGroupbox("Keybinds")
+local AutoBox = Tabs.Main:AddRightGroupbox("Auto reroll until target")
+
+local RaceLabel = RerollBox:AddLabel("Current race: ?")
+local FragLabel = RerollBox:AddLabel("Fragments: ?")
+RerollBox:AddLabel("Reroll 3000 | Cyborg 2500 | Ghoul free\nSwitching to Ghoul/Cyborg may replace your current race.", true)
+
+-- Single reroll (shared by the button and the keybind)
+local busy = false
+local autoRunning = false
+
+local function RerollOnce()
+    if busy then return end
+    local affordable, have = CanAfford(COSTS.Reroll)
+    if not affordable then
+        Notify(string.format("Not enough fragments: need %d, have %d", COSTS.Reroll, have), 4)
+        return
+    end
+    busy = true
+    task.spawn(function()
+        local before = GetRace()
+        local ok, result = InvokeReroll()
+        if not ok then
+            Notify("Reroll failed: " .. tostring(result), 4)
+            busy = false
+            return
+        end
+        task.wait(Options.RerollDelay.Value)
+        Notify("Reroll: " .. tostring(before) .. " -> " .. tostring(GetRace()), 4)
+        busy = false
+    end)
+end
+
+-- Ghoul / Cyborg (same remotes as the hub's shop buttons)
+local function ChangeRace(label, cost, ...)
+    if busy then return end
+    local affordable, have = CanAfford(cost)
+    if not affordable then
+        Notify(string.format("Not enough fragments for %s: need %d, have %d", label, cost, have), 4)
+        return
+    end
+    local args = { ... }
+    busy = true
+    task.spawn(function()
+        local before = GetRace()
+        local ok, result = InvokeCommF(unpack(args))
+        if not ok then
+            Notify(label .. " failed: " .. tostring(result), 4)
+            busy = false
+            return
+        end
+        task.wait(1.5)
+        Notify(label .. ": " .. tostring(before) .. " -> " .. tostring(GetRace()) .. " (reply: " .. tostring(result) .. ")", 5)
+        busy = false
+    end)
+end
+
+local function ChangeToGhoul() ChangeRace("Ghoul", COSTS.Ghoul, "Ectoplasm", "Change", 4) end
+local function ChangeToCyborg() ChangeRace("Cyborg", COSTS.Cyborg, "CyborgTrainer", "Buy") end
+
+RerollBox:AddButton({
+    Text = "Reroll once (3000)",
+    Func = RerollOnce,
+    DoubleClick = true,
+    Tooltip = "Double click to reroll your race",
+})
+RerollBox:AddButton({
+    Text = "Change to Ghoul (free)",
+    Func = ChangeToGhoul,
+    DoubleClick = true,
+    Tooltip = "Double click",
+})
+RerollBox:AddButton({
+    Text = "Change to Cyborg (2500)",
+    Func = ChangeToCyborg,
+    DoubleClick = true,
+    Tooltip = "Double click",
+})
+
+-- Auto reroll settings
+AutoBox:AddDropdown("TargetRaces", {
+    Values = TARGETS,
+    Multi = true,
+    Text = "Target races",
+    Tooltip = "Stops as soon as you land any selected race",
+})
+AutoBox:AddSlider("MaxRerolls", {
+    Text = "Max rerolls", Default = 10, Min = 1, Max = 50, Rounding = 0,
+})
+AutoBox:AddSlider("RerollDelay", {
+    Text = "Delay between rerolls", Default = 2, Min = 1, Max = 5, Rounding = 1, Suffix = "s",
+})
+AutoBox:AddToggle("AutoReroll", {
+    Text = "Auto reroll",
+    Default = false,
+    Tooltip = "Rerolls until a target race or the max count",
+})
+
+-- Keybinds
+KeyBox:AddToggle("KeybindEnabled", {
+    Text = "Enable keybinds",
+    Default = false,
+    Tooltip = "Keys do nothing while this is off (prevents accidental rerolls)",
+})
+KeyBox:AddLabel("Reroll key"):AddKeyPicker("RerollKey", {
+    Default = "P", Mode = "Toggle", NoUI = true, Text = "Reroll once",
+})
+KeyBox:AddLabel("Auto key"):AddKeyPicker("AutoKey", {
+    Default = "O", Mode = "Toggle", NoUI = true, Text = "Start / stop auto reroll",
+})
+KeyBox:AddLabel("Ghoul key"):AddKeyPicker("GhoulKey", {
+    Default = "None", Mode = "Toggle", NoUI = true, Text = "Change to Ghoul",
+})
+KeyBox:AddLabel("Cyborg key"):AddKeyPicker("CyborgKey", {
+    Default = "None", Mode = "Toggle", NoUI = true, Text = "Change to Cyborg",
+})
+KeyBox:AddLabel("Keyboard keys only. Ghoul/Cyborg keys are unbound until you set them.", true)
+
+----------------------------------------------------------------------
+-- Auto reroll loop
+----------------------------------------------------------------------
+local function StopAuto()
+    autoRunning = false
+end
+
+local function StartAuto()
+    if autoRunning or busy then
+        if not autoRunning then Toggles.AutoReroll:SetValue(false) end
+        return
+    end
+    if SelectedTargetCount() == 0 then
+        Notify("Select at least one target race first.", 3)
+        Toggles.AutoReroll:SetValue(false)
+        return
+    end
+    local already = CurrentTargetHit()
+    if already then
+        Notify("You already have " .. already .. ".", 3)
+        Toggles.AutoReroll:SetValue(false)
+        return
+    end
+
+    autoRunning = true
+    busy = true
+    task.spawn(function()
+        local maxCount = Options.MaxRerolls.Value
+        local count = 0
+        while autoRunning and not Unloaded and count < maxCount do
+            count = count + 1
+            local affordable, have = CanAfford(COSTS.Reroll)
+            if not affordable then
+                Notify(string.format("Stopped: need %d fragments, have %d", COSTS.Reroll, have), 5)
+                break
+            end
+            local before = GetRace()
+            local ok, result = InvokeReroll()
+            if not ok then
+                Notify("Reroll failed: " .. tostring(result), 4)
+                break
+            end
+            task.wait(Options.RerollDelay.Value)
+            Notify(string.format("Reroll %d/%d: %s -> %s", count, maxCount, tostring(before), tostring(GetRace())), 3)
+            local hit = CurrentTargetHit()
+            if hit then
+                Notify("Got " .. hit .. "! Stopped.", 5)
+                break
+            end
+        end
+        if autoRunning and count >= maxCount and not CurrentTargetHit() then
+            Notify("Reached max rerolls (" .. maxCount .. "). Stopped.", 5)
+        end
+        autoRunning = false
+        busy = false
+        pcall(function() Toggles.AutoReroll:SetValue(false) end)
+    end)
+end
+
+Toggles.AutoReroll:OnChanged(function()
+    if Toggles.AutoReroll.Value then StartAuto() else StopAuto() end
+end)
+
+----------------------------------------------------------------------
+-- Keybind handler (reads the key pickers' current values)
+----------------------------------------------------------------------
+local keyConn = UIS.InputBegan:Connect(function(input)
+    if Unloaded then return end
+    if UIS:GetFocusedTextBox() then return end
+    if not Toggles.KeybindEnabled.Value then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local name = input.KeyCode.Name:upper()
+    if name == tostring(Options.RerollKey.Value):upper() then
+        RerollOnce()
+    elseif name == tostring(Options.AutoKey.Value):upper() then
+        Toggles.AutoReroll:SetValue(not Toggles.AutoReroll.Value)
+    elseif name == tostring(Options.GhoulKey.Value):upper() then
+        ChangeToGhoul()
+    elseif name == tostring(Options.CyborgKey.Value):upper() then
+        ChangeToCyborg()
+    end
+end)
+
+-- Live "current race" label (:SetText is not in the supplied example; guarded)
+task.spawn(function()
+    while not Unloaded do
+        pcall(function() RaceLabel:SetText("Current race: " .. tostring(GetRace() or "?")) end)
+        pcall(function() FragLabel:SetText("Fragments: " .. tostring(GetFragments() or "?")) end)
+        task.wait(1)
+    end
+end)
+
+print("[Alien Hub] Race value reads as:", GetRace(), "| fragments:", GetFragments())
+
+----------------------------------------------------------------------
+-- Menu, unload, themes and config
+----------------------------------------------------------------------
+local MenuGroup = Tabs["UI Settings"]:AddLeftGroupbox("Menu")
+MenuGroup:AddButton("Unload", function() Library:Unload() end)
+MenuGroup:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", { Default = "G", NoUI = true, Text = "Menu keybind" })
+Library.ToggleKeybind = Options.MenuKeybind
+
+Library:OnUnload(function()
+    Unloaded = true
+    autoRunning = false
+    keyConn:Disconnect()
+    Library.Unloaded = true
+end)
+
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+-- AutoReroll is never restored from a config, so launching can't start spending currency
+SaveManager:SetIgnoreIndexes({ "MenuKeybind", "AutoReroll" })
+ThemeManager:SetFolder("AlienHub")
+SaveManager:SetFolder("AlienHub/RaceReroll")
+SaveManager:BuildConfigSection(Tabs["UI Settings"])
+ThemeManager:ApplyToTab(Tabs["UI Settings"])
+SaveManager:LoadAutoloadConfig()
